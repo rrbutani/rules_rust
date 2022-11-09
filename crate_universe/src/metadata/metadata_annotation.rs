@@ -162,7 +162,7 @@ pub enum SourceAnnotation {
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub struct LockfileAnnotation {
     /// A mapping of crates/packages to additional source (network location) information.
-    pub crates: BTreeMap<PackageId, SourceAnnotation>,
+    pub crates: BTreeMap<PackageId, Option<SourceAnnotation>>,
 }
 
 impl LockfileAnnotation {
@@ -192,7 +192,7 @@ impl LockfileAnnotation {
                     )?,
                 ))
             })
-            .collect::<Result<BTreeMap<PackageId, SourceAnnotation>>>()?;
+            .collect::<Result<BTreeMap<PackageId, Option<SourceAnnotation>>>>()?;
 
         Ok(Self { crates })
     }
@@ -203,7 +203,7 @@ impl LockfileAnnotation {
         metadata: &CargoMetadata,
         lockfile: &CargoLockfile,
         workspace_metadata: &WorkspaceMetadata,
-    ) -> Result<SourceAnnotation> {
+    ) -> Result<Option<SourceAnnotation>> {
         let pkg = &metadata[&node.id];
 
         // Locate the matching lock package for the current crate
@@ -223,19 +223,15 @@ impl LockfileAnnotation {
             Some(source) => source,
             None => match spliced_source_info {
                 Some(info) => {
-                    return Ok(SourceAnnotation::Http {
+                    return Ok(Some(SourceAnnotation::Http {
                         url: info.url,
                         sha256: Some(info.sha256),
                         patch_args: None,
                         patch_tool: None,
                         patches: None,
-                    })
+                    }))
                 }
-                None => bail!(
-                    "The package '{:?} {:?}' has no source info so no annotation can be made",
-                    lock_pkg.name,
-                    lock_pkg.version
-                ),
+                None => return Ok(None),
             },
         };
 
@@ -243,7 +239,7 @@ impl LockfileAnnotation {
         if let Some(git_ref) = source.git_reference() {
             let strip_prefix = Self::extract_git_strip_prefix(pkg)?;
 
-            return Ok(SourceAnnotation::Git {
+            return Ok(Some(SourceAnnotation::Git {
                 remote: source.url().to_string(),
                 commitish: Commitish::from(git_ref.clone()),
                 shallow_since: None,
@@ -251,26 +247,26 @@ impl LockfileAnnotation {
                 patch_args: None,
                 patch_tool: None,
                 patches: None,
-            });
+            }));
         }
 
         // One of the last things that should be checked is the spliced source information as
         // other sources may more accurately represent where a crate should be downloaded.
         if let Some(info) = spliced_source_info {
-            return Ok(SourceAnnotation::Http {
+            return Ok(Some(SourceAnnotation::Http {
                 url: info.url,
                 sha256: Some(info.sha256),
                 patch_args: None,
                 patch_tool: None,
                 patches: None,
-            });
+            }));
         }
 
         // Finally, In the event that no spliced source information was included in the
         // metadata the raw source info is used for registry crates and `crates.io` is
         // assumed to be the source.
         if source.is_registry() {
-            return Ok(SourceAnnotation::Http {
+            return Ok(Some(SourceAnnotation::Http {
                 url: format!(
                     "https://crates.io/api/v1/crates/{}/{}/download",
                     lock_pkg.name, lock_pkg.version,
@@ -289,7 +285,7 @@ impl LockfileAnnotation {
                 patch_args: None,
                 patch_tool: None,
                 patches: None,
-            });
+            }));
         }
 
         bail!(
@@ -532,10 +528,10 @@ mod test {
             .map(|(_, v)| v)
             .unwrap();
         match tracing_core {
-            SourceAnnotation::Git {
+            Some(SourceAnnotation::Git {
                 strip_prefix: Some(strip_prefix),
                 ..
-            } if strip_prefix == "tracing-core" => {
+            }) if strip_prefix == "tracing-core" => {
                 // Matched correctly.
             }
             other => {
