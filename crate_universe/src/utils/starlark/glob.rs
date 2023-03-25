@@ -91,3 +91,49 @@ impl<'de> Visitor<'de> for GlobVisitor {
         })
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(untagged)]
+pub enum GlobOrLabels {
+    Glob(Glob),
+    Labels(Vec<Label>),
+}
+
+impl Default for GlobOrLabels {
+    fn default() -> Self {
+        Self::Glob(Glob::default())
+    }
+}
+
+impl From<Glob> for GlobOrLabels {
+    fn from(g: Glob) -> Self {
+        Self::Glob(g)
+    }
+}
+
+impl From<Vec<Label>> for GlobOrLabels {
+    fn from(v: Vec<Label>) -> Self {
+        Self::Labels(v)
+    }
+}
+
+impl Serialize for GlobOrLabels {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Glob(g) => g.serialize(serializer),
+            Self::Labels(l) => l.serialize(serializer),
+        }
+    }
+}
+
+impl GlobOrLabels {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Glob(g) => g.is_empty(),
+            Self::Labels(l) => l.is_empty(),
+        }
+    }
+}

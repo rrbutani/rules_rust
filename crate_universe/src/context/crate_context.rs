@@ -45,8 +45,12 @@ pub struct TargetAttributes {
     /// The path to the crate's root source file, relative to the manifest.
     pub crate_root: Option<String>,
 
-    /// A glob pattern of all source files required by the target
-    pub srcs: Glob,
+    /// A glob pattern of all source files required by the target or a label
+    /// pointing to a filegroup containing said glob (used for patching)
+    pub srcs: GlobOrLabels,
+
+    /// A label for overriding compile_data, used for patching
+    pub compile_data: Option<GlobOrLabels>,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone)]
@@ -668,35 +672,75 @@ impl CrateContext {
                         // Normalize the path so that it always renders the same regardless of platform
                         |root| root.to_string_lossy().replace('\\', "/"),
                     );
-                    println!("{}", package.id);
-                    if package.id.repr.contains("(path+file://") {
-                        println!("");
-                        println!("{crate_name} {kind} {:?}", &crate_root);
-                        println!("src: {:?}", &target.src_path);
-                        println!("pkg: {:?}", package_root);
-                        println!("root: {:?}", &crate_root);
-                        println!("workspace: {:?}", workspace.workspace_prefix);
-                        let temp_components = std::env::temp_dir().components().count() + 1;
-                        println!("temp dir components to drop: {temp_components}");
-                        let real_root: PathBuf = package_root.components().skip(temp_components).collect();
-                        println!("ACTUAL FOR REAL ROOT: {}", real_root.to_string_lossy());
-                        println!("");
-                    }
-                    let crate_root = crate_root.map(|r| {
-                        if package.id.repr.contains("(path+file://") {
-                            let temp_components = std::env::temp_dir().components().count() + 1;
-                            package_root.components().skip(temp_components).collect::<PathBuf>().join(r).to_string_lossy().to_string()
+                    let mut srcs = Glob::new_rust_srcs().into();
+                    let mut crate_root = crate_root;
+                    let mut compile_data = None;
+                    let local_patch = package.id.repr.contains("(path+file://");
+                    let temp_components = std::env::temp_dir().components().count() + 1;
+                    let real_root: PathBuf =
+                        package_root.components().skip(temp_components).collect();
+                    if local_patch && !real_root.as_os_str().is_empty() {
+                        let root = real_root.display();
+                        let package = if let Some(workspace) = &workspace.workspace_prefix {
+                            format!("{workspace}/{}", root)
                         } else {
-                            r
-                        }
-                    });
+                            root.to_string()
+                        };
+                        println!("There's a patch crate at '//{package}'."); 
+                        println!("Make sure that the following is the contents of '//{package}/BUILD.bazel':");
+                        println!("\n=================================================\n");
+                        println!(
+                            r#"
+filegroup(
+    name = "crate_root",
+    srcs = ["{crate_root}"],
+    visibility = ["//{workspace}/vendor:__subpackages__"],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//{workspace}/vendor:__subpackages__"],
+)
+
+filegroup(
+    name = "compile_data",
+    srcs = glob(
+        include = ["**"],
+        exclude = [
+            "**/* *",
+            "BUILD",
+            "BUILD.bazel",
+            "WORKSPACE",
+            "WORKSPACE.bazel",
+        ],
+    ),
+    visibility = ["//{workspace}/vendor:__subpackages__"],
+)"#,
+                            workspace = workspace.workspace_prefix.as_ref().unwrap(),
+                            crate_root = crate_root.as_deref().unwrap_or_else(|| "src/lib.rs")
+                        );
+                        println!("\n=================================================\n");
+                        srcs = GlobOrLabels::Labels(vec![Label {
+                            repository: None,
+                            package: Some(package.clone()),
+                            target: "srcs".to_string(),
+                        }]);
+                        crate_root = Some(format!("//{package}:crate_root"));
+                        compile_data = Some(GlobOrLabels::Labels(vec![Label {
+                            repository: None,
+                            package: Some(package.clone()),
+                            target: "compile_data".to_string(),
+                        }]));
+                    }
 
                     // Conditionally check to see if the dependencies is a build-script target
                     if include_build_scripts && kind == "custom-build" {
                         return Some(Rule::BuildScript(TargetAttributes {
                             crate_name,
                             crate_root,
-                            srcs: Glob::new_rust_srcs(),
+                            srcs,
+                            compile_data,
                         }));
                     }
 
@@ -705,7 +749,8 @@ impl CrateContext {
                         return Some(Rule::ProcMacro(TargetAttributes {
                             crate_name,
                             crate_root,
-                            srcs: Glob::new_rust_srcs(),
+                            srcs,
+                            compile_data,
                         }));
                     }
 
@@ -728,7 +773,8 @@ impl CrateContext {
                         return Some(Rule::Binary(TargetAttributes {
                             crate_name: target.name.clone(),
                             crate_root,
-                            srcs: Glob::new_rust_srcs(),
+                            srcs,
+                            compile_data,
                         }));
                     }
 
@@ -781,7 +827,8 @@ mod test {
             BTreeSet::from([Rule::Library(TargetAttributes {
                 crate_name: "common".to_owned(),
                 crate_root: Some("lib.rs".to_owned()),
-                srcs: Glob::new_rust_srcs(),
+                srcs: Glob::new_rust_srcs().into(),
+                compile_data: None,
             })]),
         );
     }
@@ -813,7 +860,7 @@ mod test {
         let include_build_scripts = false;
         let context = CrateContext::new(
             crate_annotation,
-            &annotations.metadata.packages,
+            &annotations.metadata,
             &annotations.lockfile.crates,
             &pairred_extras,
             &annotations.features,
@@ -828,12 +875,14 @@ mod test {
                 Rule::Library(TargetAttributes {
                     crate_name: "common".to_owned(),
                     crate_root: Some("lib.rs".to_owned()),
-                    srcs: Glob::new_rust_srcs(),
+                    srcs: Glob::new_rust_srcs().into(),
+                    compile_data: None,
                 }),
                 Rule::Binary(TargetAttributes {
                     crate_name: "common-bin".to_owned(),
                     crate_root: Some("main.rs".to_owned()),
-                    srcs: Glob::new_rust_srcs(),
+                    srcs: Glob::new_rust_srcs().into(),
+                    compile_data: None,
                 }),
             ]),
         );
@@ -876,7 +925,7 @@ mod test {
         let include_build_scripts = true;
         let context = CrateContext::new(
             crate_annotation,
-            &annotations.metadata.packages,
+            &annotations.metadata,
             &annotations.lockfile.crates,
             &annotations.pairred_extras,
             &annotations.features,
@@ -892,12 +941,14 @@ mod test {
                 Rule::Library(TargetAttributes {
                     crate_name: "openssl_sys".to_owned(),
                     crate_root: Some("src/lib.rs".to_owned()),
-                    srcs: Glob::new_rust_srcs(),
+                    srcs: Glob::new_rust_srcs().into(),
+                    compile_data: None,
                 }),
                 Rule::BuildScript(TargetAttributes {
                     crate_name: "build_script_main".to_owned(),
                     crate_root: Some("build/main.rs".to_owned()),
-                    srcs: Glob::new_rust_srcs(),
+                    srcs: Glob::new_rust_srcs().into(),
+                    compile_data: None,
                 })
             ]),
         );
@@ -921,7 +972,7 @@ mod test {
         let include_build_scripts = false;
         let context = CrateContext::new(
             crate_annotation,
-            &annotations.metadata.packages,
+            &annotations.metadata,
             &annotations.lockfile.crates,
             &annotations.pairred_extras,
             &annotations.features,
@@ -936,7 +987,8 @@ mod test {
             BTreeSet::from([Rule::Library(TargetAttributes {
                 crate_name: "openssl_sys".to_owned(),
                 crate_root: Some("src/lib.rs".to_owned()),
-                srcs: Glob::new_rust_srcs(),
+                srcs: Glob::new_rust_srcs().into(),
+                compile_data: None,
             })]),
         );
     }
@@ -956,7 +1008,7 @@ mod test {
         let include_build_scripts = false;
         let context = CrateContext::new(
             crate_annotation,
-            &annotations.metadata.packages,
+            &annotations.metadata,
             &annotations.lockfile.crates,
             &annotations.pairred_extras,
             &annotations.features,
@@ -971,7 +1023,8 @@ mod test {
             BTreeSet::from([Rule::Library(TargetAttributes {
                 crate_name: "sysinfo".to_owned(),
                 crate_root: Some("src/lib.rs".to_owned()),
-                srcs: Glob::new_rust_srcs(),
+                srcs: Glob::new_rust_srcs().into(),
+                compile_data: None,
             })]),
         );
     }
