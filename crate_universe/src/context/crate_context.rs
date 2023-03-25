@@ -7,10 +7,14 @@ use cargo_metadata::{Node, Package, PackageId};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{CrateId, GenBinaries};
-use crate::metadata::{CrateAnnotation, Dependency, MetadataAnnotation, PairredExtras, SourceAnnotation};
+use crate::metadata::{
+    CrateAnnotation, Dependency, MetadataAnnotation, PairredExtras, SourceAnnotation,
+};
 use crate::splicing::WorkspaceMetadata;
 use crate::utils::sanitize_module_name;
-use crate::utils::starlark::{Glob, SelectList, SelectMap, SelectStringDict, SelectStringList};
+use crate::utils::starlark::{
+    Glob, GlobOrLabels, Label, SelectList, SelectMap, SelectStringDict, SelectStringList,
+};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone)]
 pub struct CrateDependency {
